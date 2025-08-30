@@ -154,7 +154,7 @@ async def async_request_eb_openai_chat_completions(
                             most_recent_timestamp = timestamp
 
                     # output.generated_text = generated_text
-                    if output.generated_text.strip() == "":
+                    if output.generated_text.strip() == "" and output.reasoning_content.strip() == "":
                         output.success = False
                         output.error = "No generated text found!"
                     else:
@@ -250,6 +250,7 @@ async def async_request_eb_openai_completions(
                                 # Note that text could be empty here
                                 # e.g. for special tokens
                                 text = choices[0].get("text")
+                                reason_content = choices[0].get("reasoning_content")
 
                                 # First token
                                 if not first_chunk_received:
@@ -262,6 +263,7 @@ async def async_request_eb_openai_completions(
                                     output.itl.append(timestamp - most_recent_timestamp)
 
                                 generated_text += text or ""
+                                output.reasoning_content += reason_content or ""
 
                                 most_recent_timestamp = timestamp
                                 output.arrival_time.append(choices[0].get("arrival_time", timestamp))
@@ -279,7 +281,7 @@ async def async_request_eb_openai_completions(
                     output.generated_text = generated_text
                     output.latency = most_recent_timestamp - st
 
-                    if output.generated_text == "":
+                    if output.generated_text.strip() == "" and output.reasoning_content.strip() == "":
                         output.success = False
                         output.error = "No generated text found!"
                     else:
