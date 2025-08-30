@@ -39,9 +39,11 @@ from backend_request_func import (
     RequestFuncInput,
     RequestFuncOutput,
 )
-from benchmark_dataset import EBChatDataset, EBDataset, SampleRequest
+from benchmark_dataset import EBChatDataset, EBDataset, RandomDataset, SampleRequest
 from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
 from tqdm.asyncio import tqdm
+
+from fastdeploy.input.preprocess import InputPreprocessor
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
 
@@ -365,6 +367,7 @@ async def benchmark(
         )
     else:
         print("Initial test run completed. Starting main benchmark run...")
+        time.sleep(1)
 
     if lora_modules:
         # For each input request, choose a LoRA module at random.
@@ -816,6 +819,8 @@ def main(args: argparse.Namespace):
         api_url = f"http://{args.host}:{args.port}{args.endpoint}"
         base_url = f"http://{args.host}:{args.port}"
 
+    tokenizer = InputPreprocessor(tokenizer_id).create_processor().tokenizer
+
     if args.dataset_name is None:
         raise ValueError("Please specify '--dataset-name' and the corresponding " "'--dataset-path' if required.")
 
@@ -830,6 +835,15 @@ def main(args: argparse.Namespace):
         ).sample(
             num_requests=args.num_prompts,
             output_len=args.sharegpt_output_len,
+        ),
+        "random": lambda: RandomDataset(dataset_path=args.dataset_path).sample(
+            tokenizer=tokenizer,
+            num_requests=args.num_prompts,
+            prefix_len=args.random_prefix_len,
+            input_len=args.random_input_len,
+            output_len=args.random_output_len,
+            range_ratio=args.random_range_ratio,
+            use_chat_template=True if args.backend == "openai-chat" else False,
         ),
     }
 

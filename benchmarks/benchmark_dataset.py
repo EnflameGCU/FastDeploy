@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from io import BytesIO
 from typing import Any, Optional, Union
 
+import numpy as np
 from PIL import Image
 
 logger = logging.getLogger(__name__)
@@ -315,3 +316,110 @@ class EBChatDataset(BenchmarkDataset):
 
         self.maybe_oversample_requests(samples, num_requests)
         return samples
+
+
+class RandomDataset(BenchmarkDataset):
+    # Default values copied from benchmark_serving.py for the random dataset.
+    DEFAULT_PREFIX_LEN = 0
+    DEFAULT_RANGE_RATIO = 0.0
+    DEFAULT_INPUT_LEN = 1024
+    DEFAULT_OUTPUT_LEN = 128
+
+    def __init__(
+        self,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        random.seed(self.random_seed)
+        np.random.seed(self.random_seed)
+
+    def sample(
+        self,
+        tokenizer,
+        num_requests: int,
+        prefix_len: int = DEFAULT_PREFIX_LEN,
+        range_ratio: float = DEFAULT_RANGE_RATIO,
+        input_len: int = DEFAULT_INPUT_LEN,
+        output_len: int = DEFAULT_OUTPUT_LEN,
+        use_chat_template: bool = True,
+        **kwargs,
+    ) -> list[SampleRequest]:
+        # Enforce range_ratio < 1
+        assert range_ratio < 1.0, "random_range_ratio must be < 1.0 to ensure a valid sampling range"
+        chat_template_len = 0
+        if use_chat_template:
+            assert tokenizer.chat_template is not None, "The tokenizer does not support chat_template."
+            tmp_messages = [{"role": "user", "content": "1"}]
+            formatted_prompt = tokenizer.apply_chat_template(
+                tmp_messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            formatted_tokens = tokenizer.tokenize(formatted_prompt, add_special_tokens=False)
+            formatted_token_ids = tokenizer.convert_tokens_to_ids(formatted_tokens)
+            chat_template_len = len(formatted_token_ids) - 1
+            assert input_len >= chat_template_len, (
+                f"The input length({input_len}) is less than the "
+                f"chat_template_len({chat_template_len}), "
+                f"it is recommended to use endpoint such as v1/completions."
+            )
+        print(f"chat_template_len:{chat_template_len}", flush=True)
+
+        vocab_size = tokenizer.vocab_size
+        num_special_tokens = tokenizer.num_special_tokens_to_add()
+        real_input_len = input_len - num_special_tokens - chat_template_len
+        assert input_len > 0 and real_input_len >= 0, (
+            f"The input_len({input_len}) should greater or equal to "
+            f"count of tokens added.(num_special_tokens:{num_special_tokens}, "
+            f"chat_template_len:{chat_template_len})"
+        )
+
+        prefix_token_ids = np.random.randint(0, vocab_size, size=prefix_len).tolist() if prefix_len > 0 else []
+
+        # New sampling logic: [X * (1 - b), X * (1 + b)]
+        input_low = int(real_input_len * (1 - range_ratio))
+        input_high = int(real_input_len * (1 + range_ratio))
+        output_low = int(output_len * (1 - range_ratio))
+        output_high = int(output_len * (1 + range_ratio))
+
+        input_lens = np.random.randint(input_low, input_high + 1, size=num_requests)
+        output_lens = np.random.randint(output_low, output_high + 1, size=num_requests)
+        offsets = np.random.randint(0, vocab_size, size=num_requests)
+
+        requests = []
+        for i in range(num_requests):
+            inner_seq = ((offsets[i] + i + np.arange(input_lens[i] * 2)) % vocab_size).tolist()
+            token_sequence = prefix_token_ids + inner_seq
+            prompt = tokenizer.decode(token_sequence)
+            # After decoding the prompt we have to encode and decode it again.
+            # This is done because in some cases N consecutive tokens
+            # give a string tokenized into != N number of tokens.
+            # For example for GPT2Tokenizer:
+            # [6880, 6881] -> ['Ġcalls', 'here'] ->
+            # [1650, 939, 486] -> ['Ġcall', 'sh', 'ere']
+            # To avoid uncontrolled change of the prompt length,
+            # the encoded sequence is truncated before being decode again.
+            total_input_len = prefix_len + int(input_lens[i])
+            tokens = tokenizer.tokenize(prompt, add_special_tokens=False)
+            re_encoded_sequence = tokenizer.convert_tokens_to_ids(tokens)[:total_input_len]
+            # re_encoded_sequence = tokenizer.encode(
+            #     prompt, add_special_tokens=False)[:total_input_len]
+            content = tokenizer.decode(re_encoded_sequence)
+            total_input_len = len(re_encoded_sequence)
+            # prompt_length = len(content)
+            # print(f"token_sequence:{len(token_sequence)}, total_input_len:{total_input_len}, prompt_length:{prompt_length}", flush=True)
+
+            json_data = dict(
+                {"model": "default", "messages": [{"role": "user", "content": content}], "max_tokens": output_lens[i]}
+            )
+            requests.append(
+                SampleRequest(
+                    no=i + 1,
+                    prompt=content,
+                    prompt_len=total_input_len,
+                    json_data=json_data,
+                    history_QA=json_data["messages"],
+                    expected_output_len=int(output_lens[i]),
+                )
+            )
+        return requests
